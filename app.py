@@ -20,7 +20,7 @@ CHANNEL_2_ID = -1003859905398  # KultovHesitey
 ADMIN_IDS = [8377328708, 995258854]
 
 REQUIRED_INVITES = 7
-RANDOM_CHANCE = 20
+RANDOM_CHANCE = 5  # Шанс 5%
 
 PHOTO_URL = "https://i.postimg.cc/90Ryk33F/file-000000005fd87243ba6d7497f8878878.png"
 
@@ -214,6 +214,7 @@ async def handle_menu(callback: CallbackQuery, state: FSMContext):
 # ========== ПРОВЕРКА ПОДПИСКИ ==========
 @dp.callback_query(lambda c: c.data == "check_subscribe")
 async def handle_check_subscribe(callback: CallbackQuery, state: FSMContext):
+    global used_gifts
     await callback.answer("🔍 Проверяю...", show_alert=False)
     
     user_id = callback.from_user.id
@@ -293,9 +294,8 @@ async def handle_check_subscribe(callback: CallbackQuery, state: FSMContext):
                 used_gifts[user_id] = gift_name
                 await callback.message.delete()
                 await callback.message.answer(
-                    f"✅ *Поздравляю! Ты выполнил все условия!*\n\n"
-                    f"🎁 *Твой подарок:* {gift_name}\n\n"
-                    f"📌 *За подарком обращаться:* @FuckHesitey",
+                    f"✅ *Ты подписался на каналы!*\n\n"
+                    f"🎁 *За подарком обращаться:* @FuckHesitey",
                     parse_mode="Markdown",
                     reply_markup=main_menu_keyboard()
                 )
@@ -304,8 +304,8 @@ async def handle_check_subscribe(callback: CallbackQuery, state: FSMContext):
                 await callback.message.delete()
                 await callback.message.answer(
                     f"✅ *Ты подписался на каналы!*\n\n"
-                    f"🎁 *Попробуй ещё раз — возможно, в следующий раз тебе повезёт получить особый бонус!*\n\n"
-                    f"👥 *Чтобы получить гарантированный подарок, пригласи ещё {remaining} друзей!*",
+                    f"🎁 *За подарком обращаться:* @FuckHesitey\n\n"
+                    f"👥 *Пригласи ещё {remaining} друзей, чтобы получить гарантированный подарок!*",
                     parse_mode="Markdown",
                     reply_markup=main_menu_keyboard()
                 )
@@ -532,4 +532,4 @@ async def main():
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     loop.create_task(start_web())
-    loop.run_until_complete(main()) 
+    loop.run_until_complete(main())
