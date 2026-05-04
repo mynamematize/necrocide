@@ -1,7 +1,7 @@
 import asyncio
-import os
 import random
 import string
+import os
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -9,6 +9,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQu
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
+from aiohttp import web
 
 # ========== КОНФИГУРАЦИЯ ==========
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -24,11 +25,11 @@ RANDOM_CHANCE = 20
 PHOTO_URL = "https://i.postimg.cc/90Ryk33F/file-000000005fd87243ba6d7497f8878878.png"
 
 # Словари для хранения данных
-invites_count = {}      # {user_id: count} - зачисленные рефералы
-pending_referrals = {}  # {user_id: referrer_id} - кто кого пригласил (еще не подтверждено)
-promocodes = {}         # {code: {"name": ..., "remaining": ..., "expires": ...}}
-used_promocodes = {}    # {user_id: [codes]}
-used_gifts = {}         # {user_id: gift_name} - кто какой подарок уже получил
+invites_count = {}
+pending_referrals = {}
+promocodes = {}
+used_promocodes = {}
+used_gifts = {}
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -111,19 +112,15 @@ async def send_main_menu(message_or_callback):
             reply_markup=main_menu_keyboard()
         )
 
-# ========== КОМАНДА /START (с реферальным кодом) ==========
+# ========== КОМАНДА /START ==========
 @dp.message(Command("start"))
 async def start_command(message: types.Message):
     args = message.text.split()
     user_id = message.from_user.id
     
-    # Если есть реферальный код (приглашение)
     if len(args) > 1 and args[1].isdigit():
         referrer_id = int(args[1])
-        
-        # Нельзя пригласить самого себя
         if referrer_id != user_id:
-            # Проверяем, не был ли уже этот пользователь приглашен
             if user_id not in pending_referrals:
                 pending_referrals[user_id] = referrer_id
                 await message.answer(
@@ -214,7 +211,7 @@ async def handle_menu(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
-# ========== ПРОВЕРКА ПОДПИСКИ (здесь же зачисляется рефералка) ==========
+# ========== ПРОВЕРКА ПОДПИСКИ ==========
 @dp.callback_query(lambda c: c.data == "check_subscribe")
 async def handle_check_subscribe(callback: CallbackQuery, state: FSMContext):
     await callback.answer("🔍 Проверяю...", show_alert=False)
@@ -224,19 +221,16 @@ async def handle_check_subscribe(callback: CallbackQuery, state: FSMContext):
     is_subscribed_2 = await check_subscription(user_id, CHANNEL_2_ID)
     
     if is_subscribed_1 and is_subscribed_2:
-        # ========== ЗАЧИСЛЕНИЕ РЕФЕРАЛКИ ==========
+        # ЗАЧИСЛЕНИЕ РЕФЕРАЛКИ
         if user_id in pending_referrals:
             referrer_id = pending_referrals[user_id]
             
-            # Записываем реферала
             if referrer_id not in invites_count:
                 invites_count[referrer_id] = 0
             invites_count[referrer_id] += 1
             
-            # Удаляем из ожидания
             del pending_referrals[user_id]
             
-            # Сообщение тому, кто пригласил
             try:
                 await bot.send_message(
                     referrer_id,
@@ -260,7 +254,7 @@ async def handle_check_subscribe(callback: CallbackQuery, state: FSMContext):
             await callback.answer()
             return
         
-        # ========== ПРОВЕРКА - НЕ ПОЛУЧИЛ ЛИ УЖЕ ПОДАРОК ==========
+        # ПРОВЕРКА - НЕ ПОЛУЧИЛ ЛИ УЖЕ ПОДАРОК
         if user_id in used_gifts:
             await callback.message.delete()
             await callback.message.answer(
@@ -272,17 +266,13 @@ async def handle_check_subscribe(callback: CallbackQuery, state: FSMContext):
             await callback.answer()
             return
         
-        # ========== ОСНОВНАЯ ЛОГИКА С ПОДАРКАМИ ==========
         user_data = await state.get_data()
         selected_gift = user_data.get("selected_gift", "подарок")
         gift_name = "30 звёзд" if selected_gift == "gift_30" else "3 мишки" if selected_gift == "gift_mice" else "подарок"
         
-        # СЛУЧАЙНЫЙ ШАНС
         chance = random.randint(1, 100)
-        print(f"[DEBUG] Шанс: {chance}% (нужно <= {RANDOM_CHANCE})")
         
         if chance <= RANDOM_CHANCE:
-            # ВЫПАЛО СООБЩЕНИЕ О ПОДАРКЕ
             used_gifts[user_id] = gift_name
             await callback.message.delete()
             await callback.message.answer(
@@ -333,7 +323,7 @@ async def handle_check_subscribe(callback: CallbackQuery, state: FSMContext):
         await callback.message.delete()
         await callback.message.answer(text, parse_mode="Markdown", reply_markup=subscribe_keyboard())
 
-# ========== РЕФЕРАЛЬНАЯ СИСТЕМА (проверка статуса) ==========
+# ========== РЕФЕРАЛЬНАЯ СИСТЕМА ==========
 @dp.callback_query(lambda c: c.data in ["get_invite_link", "check_invites"])
 async def handle_referrals(callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -511,6 +501,21 @@ async def check_promocode(message: types.Message, state: FSMContext):
     )
     await state.clear()
 
+# ========== ВЕБ-СЕРВЕР ДЛЯ RENDER ==========
+async def health_check(request):
+    return web.Response(text="Bot is running!")
+
+async def start_web():
+    app_web = web.Application()
+    app_web.router.add_get('/', health_check)
+    runner = web.AppRunner(app_web)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 10000)
+    await site.start()
+    print("🌐 Веб-сервер для Render запущен на порту 10000")
+    while True:
+        await asyncio.sleep(3600)
+
 # ========== ЗАПУСК ==========
 async def main():
     print("=" * 50)
@@ -525,4 +530,6 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    asyncio.run(main()) 
+    loop = asyncio.get_event_loop()
+    loop.create_task(start_web())
+    loop.run_until_complete(main()) 
