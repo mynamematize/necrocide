@@ -8,6 +8,7 @@ import asyncio
 import random
 import string
 import os
+import sqlite3
 import logging
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
@@ -62,29 +63,251 @@ GIFTS = {
     "gift_mice": {"label": "🧸 3 Мишки",  "emoji": "🧸", "name": "3 Мишки"},
 }
 
+DB_PATH = "bot_data.db"
+STARTED_AT = datetime.now()
+
 # ╔══════════════════════════════════════════════════╗
-# ║              ХРАНИЛИЩЕ ДАННЫХ                   ║
+# ║                БАЗА ДАННЫХ (SQLite)             ║
 # ╚══════════════════════════════════════════════════╝
 
-users: set          = set()
-invites_count: dict = {}
-pending_refs: dict  = {}
-promocodes: dict    = {}
-used_gifts: dict    = {}
+def db_init():
+    """Создаёт все таблицы, если их ещё нет."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
 
-stats = {
-    "sub_checks":  0,
-    "gift_clicks": {
-        "gift_30":    0,
-        "gift_mice":  0,
-        "gift_promo": 0,
-    },
-    "promo_tries": 0,
-    "promo_ok":    0,
-    "total_refs":  0,
-    "gifts_given": 0,
-    "started_at":  datetime.now(),
-}
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            invite_count INTEGER DEFAULT 0,
+            used_gift TEXT DEFAULT NULL
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS pending_refs (
+            user_id INTEGER PRIMARY KEY,
+            referrer_id INTEGER NOT NULL
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS promocodes (
+            code TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            activations INTEGER NOT NULL,
+            remaining INTEGER NOT NULL,
+            expires TEXT NOT NULL
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS stats (
+            key TEXT PRIMARY KEY,
+            value INTEGER DEFAULT 0
+        )
+    """)
+
+    # Статистика по умолчанию
+    for key in ["sub_checks", "gift_30_clicks", "gift_mice_clicks",
+                "gift_promo_clicks", "promo_tries", "promo_ok",
+                "total_refs", "gifts_given"]:
+        c.execute("INSERT OR IGNORE INTO stats (key, value) VALUES (?, 0)", (key,))
+
+    conn.commit()
+    conn.close()
+
+
+# ───────────── ПОЛЬЗОВАТЕЛИ ─────────────
+
+def db_user_exists(user_id: int) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM users WHERE user_id = ?", (user_id,))
+    r = c.fetchone()
+    conn.close()
+    return r is not None
+
+
+def db_user_add(user_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
+    conn.commit()
+    conn.close()
+
+
+def db_invite_count(user_id: int) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT invite_count FROM users WHERE user_id = ?", (user_id,))
+    r = c.fetchone()
+    conn.close()
+    return r[0] if r else 0
+
+
+def db_invite_inc(user_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE users SET invite_count = invite_count + 1 WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+
+def db_used_gift_get(user_id: int) -> str | None:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT used_gift FROM users WHERE user_id = ?", (user_id,))
+    r = c.fetchone()
+    conn.close()
+    return r[0] if r else None
+
+
+def db_used_gift_set(user_id: int, name: str):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE users SET used_gift = ? WHERE user_id = ?", (name, user_id))
+    conn.commit()
+    conn.close()
+
+
+def db_total_users() -> int:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM users")
+    r = c.fetchone()
+    conn.close()
+    return r[0] if r else 0
+
+
+# ───────────── РЕФЕРАЛЫ (ожидание) ─────────────
+
+def db_pending_get(user_id: int) -> int | None:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT referrer_id FROM pending_refs WHERE user_id = ?", (user_id,))
+    r = c.fetchone()
+    conn.close()
+    return r[0] if r else None
+
+
+def db_pending_set(user_id: int, referrer_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO pending_refs (user_id, referrer_id) VALUES (?, ?)",
+              (user_id, referrer_id))
+    conn.commit()
+    conn.close()
+
+
+def db_pending_pop(user_id: int) -> int | None:
+    """Удаляет и возвращает referrer_id или None."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT referrer_id FROM pending_refs WHERE user_id = ?", (user_id,))
+    r = c.fetchone()
+    if r:
+        c.execute("DELETE FROM pending_refs WHERE user_id = ?", (user_id,))
+        conn.commit()
+        conn.close()
+        return r[0]
+    conn.close()
+    return None
+
+
+# ───────────── ПРОМОКОДЫ ─────────────
+
+def db_promo_add(code: str, name: str, activations: int, days: int):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    expires = (datetime.now() + timedelta(days=days)).isoformat()
+    c.execute(
+        "INSERT INTO promocodes (code, name, activations, remaining, expires) VALUES (?, ?, ?, ?, ?)",
+        (code, name, activations, activations, expires)
+    )
+    conn.commit()
+    conn.close()
+
+
+def db_promo_get(code: str) -> dict | None:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT * FROM promocodes WHERE code = ?", (code,))
+    r = c.fetchone()
+    conn.close()
+    if r:
+        return {
+            "code":        r[0],
+            "name":        r[1],
+            "activations": r[2],
+            "remaining":   r[3],
+            "expires":     datetime.fromisoformat(r[4]),
+        }
+    return None
+
+
+def db_promo_use(code: str):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE promocodes SET remaining = remaining - 1 WHERE code = ?", (code,))
+    conn.commit()
+    conn.close()
+
+
+def db_promo_all() -> list[dict]:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT * FROM promocodes")
+    rows = c.fetchall()
+    conn.close()
+    result = []
+    for r in rows:
+        result.append({
+            "code":        r[0],
+            "name":        r[1],
+            "activations": r[2],
+            "remaining":   r[3],
+            "expires":     datetime.fromisoformat(r[4]),
+        })
+    return result
+
+
+def db_promo_active_count() -> int:
+    now = datetime.now().isoformat()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM promocodes WHERE expires > ? AND remaining > 0", (now,))
+    r = c.fetchone()
+    conn.close()
+    return r[0] if r else 0
+
+
+def db_promo_total() -> int:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM promocodes")
+    r = c.fetchone()
+    conn.close()
+    return r[0] if r else 0
+
+
+# ───────────── СТАТИСТИКА ─────────────
+
+def db_stat_get(key: str) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT value FROM stats WHERE key = ?", (key,))
+    r = c.fetchone()
+    conn.close()
+    return r[0] if r else 0
+
+
+def db_stat_inc(key: str):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE stats SET value = value + 1 WHERE key = ?", (key,))
+    conn.commit()
+    conn.close()
+
 
 # ╔══════════════════════════════════════════════════╗
 # ║                   FSM СОСТОЯНИЯ                 ║
@@ -147,7 +370,6 @@ dp  = Dispatcher(storage=MemoryStorage())
 
 
 def html_escape(text: str) -> str:
-    """Экранирует спецсимволы HTML чтобы имена пользователей не ломали разметку."""
     return (
         text
         .replace("&", "&amp;")
@@ -157,7 +379,6 @@ def html_escape(text: str) -> str:
 
 
 def get_username_line(user) -> str:
-    """Возвращает @username или пометку об отсутствии."""
     if user.username:
         return f"@{html_escape(user.username)}"
     return "(нет username)"
@@ -191,7 +412,7 @@ def progress_bar(done: int, total: int) -> str:
 
 
 def format_uptime() -> str:
-    delta = datetime.now() - stats["started_at"]
+    delta = datetime.now() - STARTED_AT
     h, rem = divmod(int(delta.total_seconds()), 3600)
     m = rem // 60
     if h >= 24:
@@ -208,7 +429,6 @@ async def safe_delete(msg: Message) -> None:
 
 
 async def notify_admins(text: str) -> None:
-    """Отправляет уведомление админам. Текст должен быть в формате HTML."""
     for aid in ADMIN_IDS:
         try:
             await bot.send_message(aid, text, parse_mode="HTML")
@@ -248,13 +468,13 @@ async def show_main_menu(target: Message | CallbackQuery) -> None:
 @dp.message(CommandStart())
 async def cmd_start(msg: Message) -> None:
     user_id = msg.from_user.id
-    users.add(user_id)
+    db_user_add(user_id)
 
     parts = msg.text.split()
     if len(parts) > 1 and parts[1].isdigit():
         referrer_id = int(parts[1])
-        if referrer_id != user_id and user_id not in pending_refs and user_id not in used_gifts:
-            pending_refs[user_id] = referrer_id
+        if referrer_id != user_id and db_pending_get(user_id) is None and db_used_gift_get(user_id) is None:
+            db_pending_set(user_id, referrer_id)
             await msg.answer_photo(
                 photo=PHOTO_REFERRALS,
                 caption=(
@@ -304,7 +524,7 @@ async def cmd_cancel(msg: Message, state: FSMContext) -> None:
 
 @dp.callback_query(F.data == "back")
 async def cb_back(cb: CallbackQuery, state: FSMContext) -> None:
-    users.add(cb.from_user.id)
+    db_user_add(cb.from_user.id)
     await state.clear()
     await cb.answer()
     await show_main_menu(cb)
@@ -313,13 +533,13 @@ async def cb_back(cb: CallbackQuery, state: FSMContext) -> None:
 @dp.callback_query(F.data.in_({"gift_30", "gift_mice"}))
 async def cb_gift(cb: CallbackQuery, state: FSMContext) -> None:
     user_id  = cb.from_user.id
-    users.add(user_id)
+    db_user_add(user_id)
     gift_key = cb.data
-    stats["gift_clicks"][gift_key] += 1
+    db_stat_inc(f"{gift_key}_clicks")
 
-    if user_id in used_gifts:
+    if db_used_gift_get(user_id):
         await cb.answer(
-            f"❌ Ты уже получил: {used_gifts[user_id]}",
+            f"❌ Ты уже получил: {db_used_gift_get(user_id)}",
             show_alert=True,
         )
         return
@@ -327,10 +547,9 @@ async def cb_gift(cb: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(selected_gift=gift_key)
     await cb.answer()
     await safe_delete(cb.message)
-    
-    # Выбираем фото в зависимости от подарка
+
     photo = PHOTO_30_STARS if gift_key == "gift_30" else PHOTO_3_MICE
-    
+
     await cb.message.answer_photo(
         photo=photo,
         caption=(
@@ -347,12 +566,12 @@ async def cb_gift(cb: CallbackQuery, state: FSMContext) -> None:
 @dp.callback_query(F.data == "gift_promo")
 async def cb_gift_promo(cb: CallbackQuery, state: FSMContext) -> None:
     user_id = cb.from_user.id
-    users.add(user_id)
-    stats["gift_clicks"]["gift_promo"] += 1
+    db_user_add(user_id)
+    db_stat_inc("gift_promo_clicks")
 
-    if user_id in used_gifts:
+    if db_used_gift_get(user_id):
         await cb.answer(
-            f"❌ Ты уже получил: {used_gifts[user_id]}",
+            f"❌ Ты уже получил: {db_used_gift_get(user_id)}",
             show_alert=True,
         )
         return
@@ -375,8 +594,8 @@ async def cb_gift_promo(cb: CallbackQuery, state: FSMContext) -> None:
 @dp.callback_query(F.data == "referrals")
 async def cb_referrals(cb: CallbackQuery) -> None:
     user_id = cb.from_user.id
-    users.add(user_id)
-    invited = invites_count.get(user_id, 0)
+    db_user_add(user_id)
+    invited = db_invite_count(user_id)
     remain  = max(REQUIRED_INVITES - invited, 0)
     link    = make_ref_link(await bot_username(), user_id)
     bar     = progress_bar(invited, REQUIRED_INVITES)
@@ -409,8 +628,8 @@ async def cb_referrals(cb: CallbackQuery) -> None:
 @dp.callback_query(F.data == "get_link")
 async def cb_get_link(cb: CallbackQuery) -> None:
     user_id = cb.from_user.id
-    users.add(user_id)
-    invited = invites_count.get(user_id, 0)
+    db_user_add(user_id)
+    invited = db_invite_count(user_id)
     remain  = max(REQUIRED_INVITES - invited, 0)
     link    = make_ref_link(await bot_username(), user_id)
     bar     = progress_bar(invited, REQUIRED_INVITES)
@@ -431,8 +650,8 @@ async def cb_get_link(cb: CallbackQuery) -> None:
 @dp.callback_query(F.data == "check_refs")
 async def cb_check_refs(cb: CallbackQuery) -> None:
     user_id = cb.from_user.id
-    users.add(user_id)
-    invited = invites_count.get(user_id, 0)
+    db_user_add(user_id)
+    invited = db_invite_count(user_id)
     remain  = max(REQUIRED_INVITES - invited, 0)
     bar     = progress_bar(invited, REQUIRED_INVITES)
 
@@ -471,8 +690,8 @@ async def cb_check_refs(cb: CallbackQuery) -> None:
 async def cb_check_sub(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer("🔍 Проверяю...")
     user_id = cb.from_user.id
-    users.add(user_id)
-    stats["sub_checks"] += 1
+    db_user_add(user_id)
+    db_stat_inc("sub_checks")
 
     sub1 = await is_subscribed(user_id, CHANNEL_1_ID)
     sub2 = await is_subscribed(user_id, CHANNEL_2_ID)
@@ -494,11 +713,11 @@ async def cb_check_sub(cb: CallbackQuery, state: FSMContext) -> None:
         return
 
     # Зачесть реферала
-    if user_id in pending_refs:
-        ref_id = pending_refs.pop(user_id)
-        invites_count[ref_id] = invites_count.get(ref_id, 0) + 1
-        stats["total_refs"] += 1
-        count_now = invites_count[ref_id]
+    referrer_id = db_pending_pop(user_id)
+    if referrer_id:
+        db_invite_inc(referrer_id)
+        db_stat_inc("total_refs")
+        count_now = db_invite_count(referrer_id)
         bar       = progress_bar(count_now, REQUIRED_INVITES)
         remain    = max(REQUIRED_INVITES - count_now, 0)
         try:
@@ -517,7 +736,7 @@ async def cb_check_sub(cb: CallbackQuery, state: FSMContext) -> None:
                     f"{bar}\n"
                     f"*{count_now}/{REQUIRED_INVITES}* — осталось пригласить *{remain}*"
                 )
-            await bot.send_message(ref_id, ref_msg, parse_mode="Markdown")
+            await bot.send_message(referrer_id, ref_msg, parse_mode="Markdown")
         except Exception:
             pass
         await safe_delete(cb.message)
@@ -535,7 +754,7 @@ async def cb_check_sub(cb: CallbackQuery, state: FSMContext) -> None:
         return
 
     # Проверка рефералов
-    invited = invites_count.get(user_id, 0)
+    invited = db_invite_count(user_id)
     if invited < REQUIRED_INVITES:
         remain = REQUIRED_INVITES - invited
         link   = make_ref_link(await bot_username(), user_id)
@@ -557,12 +776,13 @@ async def cb_check_sub(cb: CallbackQuery, state: FSMContext) -> None:
         return
 
     # Уже получал?
-    if user_id in used_gifts:
+    used = db_used_gift_get(user_id)
+    if used:
         await safe_delete(cb.message)
         await cb.message.answer_photo(
             photo=PHOTO_URL,
             caption=(
-                f"🎁 *Ты уже получил свой подарок:* {used_gifts[user_id]}\n\n"
+                f"🎁 *Ты уже получил свой подарок:* {used}\n\n"
                 f"По вопросам пиши: {CONTACT_USERNAME}"
             ),
             parse_mode="Markdown",
@@ -575,10 +795,9 @@ async def cb_check_sub(cb: CallbackQuery, state: FSMContext) -> None:
     gift_key  = data.get("selected_gift", "gift_30")
     gift_info = GIFTS.get(gift_key, {"name": "подарок", "label": "🎁 Подарок", "emoji": "🎁"})
 
-    used_gifts[user_id] = gift_info["name"]
-    stats["gifts_given"] += 1
+    db_used_gift_set(user_id, gift_info["name"])
+    db_stat_inc("gifts_given")
 
-    # Уведомление — HTML, данные пользователя экранированы
     safe_name = html_escape(cb.from_user.full_name)
     await notify_admins(
         f"🎁 <b>Подарок выдан!</b>\n\n"
@@ -610,15 +829,15 @@ async def cb_check_sub(cb: CallbackQuery, state: FSMContext) -> None:
 @dp.message(UserState.enter_promo)
 async def process_promo(msg: Message, state: FSMContext) -> None:
     user_id = msg.from_user.id
-    users.add(user_id)
+    db_user_add(user_id)
     code    = msg.text.strip().upper()
-    stats["promo_tries"] += 1
+    db_stat_inc("promo_tries")
 
-    if user_id in used_gifts:
+    if db_used_gift_get(user_id):
         await msg.answer_photo(
             photo=PHOTO_URL,
             caption=(
-                f"🎁 *Ты уже получил подарок:* {used_gifts[user_id]}\n\n"
+                f"🎁 *Ты уже получил подарок:* {db_used_gift_get(user_id)}\n\n"
                 f"По вопросам: {CONTACT_USERNAME}"
             ),
             parse_mode="Markdown",
@@ -627,7 +846,7 @@ async def process_promo(msg: Message, state: FSMContext) -> None:
         await state.clear()
         return
 
-    promo = promocodes.get(code)
+    promo = db_promo_get(code)
 
     if not promo:
         await msg.answer_photo(
@@ -668,12 +887,11 @@ async def process_promo(msg: Message, state: FSMContext) -> None:
         return
 
     # Активация
-    promo["remaining"] -= 1
-    used_gifts[user_id] = promo["name"]
-    stats["promo_ok"]    += 1
-    stats["gifts_given"] += 1
+    db_promo_use(code)
+    db_used_gift_set(user_id, promo["name"])
+    db_stat_inc("promo_ok")
+    db_stat_inc("gifts_given")
 
-    # Уведомление — HTML, данные пользователя экранированы
     safe_name = html_escape(msg.from_user.full_name)
     await notify_admins(
         f"🎟 <b>Промокод активирован!</b>\n\n"
@@ -682,7 +900,7 @@ async def process_promo(msg: Message, state: FSMContext) -> None:
         f"🆔 <code>{user_id}</code>\n"
         f"📝 Код: <code>{html_escape(code)}</code>\n"
         f"🎁 Подарок: {html_escape(promo['name'])}\n"
-        f"📊 Осталось активаций: {promo['remaining']}/{promo['activations']}\n"
+        f"📊 Осталось активаций: {promo['remaining'] - 1}/{promo['activations']}\n"
         f"🕐 {datetime.now().strftime('%d.%m.%Y %H:%M')}"
     )
 
@@ -713,29 +931,28 @@ async def cb_adm_stats(cb: CallbackQuery) -> None:
         await cb.answer("❌ Нет доступа", show_alert=True)
         return
 
-    gc            = stats["gift_clicks"]
-    total_clicks  = sum(gc.values())
-    active_promos = sum(
-        1 for p in promocodes.values()
-        if datetime.now() <= p["expires"] and p["remaining"] > 0
-    )
-    total_promos = len(promocodes)
-    uptime       = format_uptime()
+    gc_30    = db_stat_get("gift_30_clicks")
+    gc_mice  = db_stat_get("gift_mice_clicks")
+    gc_promo = db_stat_get("gift_promo_clicks")
+    total_clicks  = gc_30 + gc_mice + gc_promo
+    sub_checks    = db_stat_get("sub_checks")
+    gifts_given   = db_stat_get("gifts_given")
+    promo_tries   = db_stat_get("promo_tries")
+    promo_ok      = db_stat_get("promo_ok")
+    total_refs    = db_stat_get("total_refs")
+    total_users   = db_total_users()
+    active_promos = db_promo_active_count()
+    total_promos  = db_promo_total()
+    uptime        = format_uptime()
 
-    conv_gifts = (
-        f"{stats['gifts_given'] / total_clicks * 100:.1f}%"
-        if total_clicks > 0 else "—"
-    )
-    conv_promo = (
-        f"{stats['promo_ok'] / stats['promo_tries'] * 100:.1f}%"
-        if stats["promo_tries"] > 0 else "—"
-    )
+    conv_gifts = f"{gifts_given / total_clicks * 100:.1f}%" if total_clicks > 0 else "—"
+    conv_promo = f"{promo_ok / promo_tries * 100:.1f}%" if promo_tries > 0 else "—"
 
     text = (
         f"📊 *Статистика*\n"
         f"{'─' * 30}\n\n"
 
-        f"👥 *Пользователей:* {len(users)}\n"
+        f"👥 *Пользователей:* {total_users}\n"
         f"📢 *Каналов:* 2\n"
         f"⏱ *Аптайм:* {uptime}\n\n"
 
@@ -743,26 +960,26 @@ async def cb_adm_stats(cb: CallbackQuery) -> None:
         f"🎁 *Подарки*\n\n"
 
         f"Нажатий на подарки: *{total_clicks}*\n"
-        f"   ├ 💰 30 Звёзд — {gc['gift_30']}\n"
-        f"   ├ 🧸 3 Мишки — {gc['gift_mice']}\n"
-        f"   └ 🎟 Промокод — {gc['gift_promo']}\n\n"
+        f"   ├ 💰 30 Звёзд — {gc_30}\n"
+        f"   ├ 🧸 3 Мишки — {gc_mice}\n"
+        f"   └ 🎟 Промокод — {gc_promo}\n\n"
 
-        f"✅ Нажатий «Я подписался»: *{stats['sub_checks']}*\n"
-        f"🌹 Подарков выдано: *{stats['gifts_given']}*\n"
+        f"✅ Нажатий «Я подписался»: *{sub_checks}*\n"
+        f"🌹 Подарков выдано: *{gifts_given}*\n"
         f"📈 Конверсия в подарок: *{conv_gifts}*\n\n"
 
         f"{'─' * 30}\n"
         f"🎟 *Промокоды*\n\n"
 
-        f"Введено промокодов: *{stats['promo_tries']}*\n"
-        f"Успешно активировано: *{stats['promo_ok']}*\n"
+        f"Введено промокодов: *{promo_tries}*\n"
+        f"Успешно активировано: *{promo_ok}*\n"
         f"Конверсия: *{conv_promo}*\n"
         f"Активных кодов: *{active_promos} из {total_promos}*\n\n"
 
         f"{'─' * 30}\n"
         f"🔗 *Рефералы*\n\n"
 
-        f"Всего засчитано: *{stats['total_refs']}*\n"
+        f"Всего засчитано: *{total_refs}*\n"
         f"Порог для подарка: *{REQUIRED_INVITES}*"
     )
 
@@ -781,13 +998,15 @@ async def cb_adm_list(cb: CallbackQuery) -> None:
     if not is_admin(cb.from_user.id):
         await cb.answer("❌ Нет доступа", show_alert=True)
         return
-    if not promocodes:
+
+    promos = db_promo_all()
+    if not promos:
         await cb.answer("Промокодов пока нет", show_alert=True)
         return
 
     now   = datetime.now()
     lines = ["📋 *Список промокодов*\n"]
-    for code, p in promocodes.items():
+    for p in promos:
         is_expired = now > p["expires"]
         is_empty   = p["remaining"] <= 0
         if is_expired:
@@ -800,7 +1019,7 @@ async def cb_adm_list(cb: CallbackQuery) -> None:
         used = p["activations"] - p["remaining"]
         bar  = progress_bar(used, p["activations"])
         lines.append(
-            f"🔹 `{code}`\n"
+            f"🔹 `{p['code']}`\n"
             f"   🎁 {p['name']}\n"
             f"   {bar}\n"
             f"   📊 {p['remaining']}/{p['activations']} осталось\n"
@@ -889,14 +1108,7 @@ async def adm_promo_days(msg: Message, state: FSMContext) -> None:
     code    = gen_promo_code()
     expires = datetime.now() + timedelta(days=days)
 
-    promocodes[code] = {
-        "name":        name,
-        "activations": acts,
-        "remaining":   acts,
-        "expires":     expires,
-        "created_by":  msg.from_user.id,
-        "created_at":  datetime.now(),
-    }
+    db_promo_add(code, name, acts, days)
 
     await state.clear()
     await msg.answer_photo(
@@ -935,8 +1147,10 @@ async def start_webserver() -> None:
 # ╚══════════════════════════════════════════════════╝
 
 async def main() -> None:
+    db_init()
     log.info("=" * 52)
     log.info("  NECROCIDE / HESITEY BOT — СТАРТ")
+    log.info(f"  База данных: {DB_PATH}")
     log.info(f"  Админы:    {ADMIN_IDS}")
     log.info(f"  Рефералов: {REQUIRED_INVITES}")
     log.info("=" * 52)
