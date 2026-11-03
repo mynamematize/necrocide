@@ -15,9 +15,9 @@ from aiogram.types import (
 )
 from PIL import Image
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "9052794763:AAFJo9_eZkc4irwSW0sk4xvwU90DdPwR_C4").strip()
-ADMIN_ID = int(os.getenv("ADMIN_ID", "712428393"))
-OCR_API_KEY = os.getenv("K8183641444781888957", "").strip()
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+OCR_API_KEY = os.getenv("OCR_SPACE_API_KEY")
 DB_PATH = os.getenv("DB_PATH", "free_stars.sqlite3")
 REQUIRED_COUNT = 20
 TARGET = "@OppcountGIFTS"
